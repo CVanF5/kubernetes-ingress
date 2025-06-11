@@ -185,6 +185,9 @@ ARG NGINX_PLUS_VERSION
 ARG NGINX_AGENT
 ARG NGINX_PLUS_VERSION
 ARG PACKAGE_REPO
+ARG POLICY_MOUNT_DIR
+ARG COMPILE_POLICIES
+ARG INCLUDE_POLICIES
 
 ENV NGINX_VERSION=${NGINX_PLUS_VERSION}
 
@@ -212,6 +215,16 @@ RUN --mount=type=bind,from=alpine-fips-3.19,target=/tmp/fips/ \
 	&& nap-waf.sh \
 	&& if [ "${NGINX_AGENT}" = "true" ]; then \
 	agent.sh \
+	; fi \
+	&& if [ "${COMPILE_POLICIES}" = "true" ] || [ "${INCLUDE_POLICIES}" = "true" ]; then \
+	mkdir -p ${POLICY_MOUNT_DIR} \
+	&& if [ "${COMPILE_POLICIES}" = "true" ]; then \
+	compile-policies \
+	&& cp -av build/compiled-policies/* ${POLICY_MOUNT_DIR}/ \
+	; fi \
+	&& if [ "${INCLUDE_POLICIES}" = "true" ]; then \
+	cp -av build/compiled-policies/* ${POLICY_MOUNT_DIR}/ \
+	; fi \
 	; fi
 
 
@@ -291,12 +304,32 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	&& if [ -z "${NAP_MODULES##*dos*}" ]; then nap-dos.sh; fi
 
 ############################################# Base image for Debian with NGINX Plus and App Protect WAFv5 #############################################
-FROM debian-plus AS debian-plus-nap-v5
+FROM debian-plus AS debian-plus-nap-v5-base
 ARG NAP_MODULES
 ARG NGINX_AGENT
 ARG NGINX_PLUS_VERSION
+ARG POLICY_MOUNT_DIR
+ARG COMPILE_POLICIES
+ARG INCLUDE_POLICIES
 
 ENV NGINX_VERSION=${NGINX_PLUS_VERSION}
+ENV POLICY_MOUNT_DIR=${POLICY_MOUNT_DIR:-/etc/nginx/app_protect/policies}
+
+# First stage: copy policies
+FROM scratch AS policies
+COPY --from=0 /build/compiled-policies/ /
+
+# Main stage
+FROM debian-plus-nap-v5-base AS debian-plus-nap-v5
+ARG NAP_MODULES
+ARG NGINX_AGENT
+ARG NGINX_PLUS_VERSION
+ARG POLICY_MOUNT_DIR
+ARG COMPILE_POLICIES
+ARG INCLUDE_POLICIES
+
+ENV NGINX_VERSION=${NGINX_PLUS_VERSION}
+ENV POLICY_MOUNT_DIR=${POLICY_MOUNT_DIR:-/etc/nginx/app_protect/policies}
 
 RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
 	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
@@ -321,6 +354,15 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	&& if [ "${NGINX_AGENT}" = "true" ]; then \
 	agent.sh; \
 	fi
+
+# Copy policies if requested
+COPY --from=policies / ${POLICY_MOUNT_DIR}/
+
+# Print policy status if requested
+RUN if [ "${COMPILE_POLICIES}" = "true" ] || [ "${INCLUDE_POLICIES}" = "true" ]; then \
+	echo "Policy compilation requested: COMPILE_POLICIES=${COMPILE_POLICIES}, INCLUDE_POLICIES=${INCLUDE_POLICIES}" \
+	echo "POLICY_MOUNT_DIR=${POLICY_MOUNT_DIR}" \
+	; fi
 
 
 ############################################# Base image for UBI #############################################

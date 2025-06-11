@@ -20,11 +20,14 @@ TELEMETRY_ENDPOINT            ?= oss.edge.df.f5.com:443
 
 # NAP V5 Policy Compilation Variables
 NAP_V5_COMPILER_IMAGE         ?= private-registry.nginx.com/nap/waf-compiler:$(NAP_V5_VERSION) ## NGINX App Protect V5 container image for policy compilation
-POLICY_DIR                    ?= $(strip build/policies )## Directory where policy files are stored
-COMPILED_POLICY_DIR           ?= $(strip build/compiled-policies )## Directory for compiled policy files
+POLICY_DIR                    ?= $(strip build/policies)## Directory where policy files are stored
+COMPILED_POLICY_DIR           ?= $(strip build/compiled-policies)## Directory for compiled policy files
 POLICY_COMPILE_CONTAINER      ?= nap-v5-compiler ## Name for the temporary policy compilation container
 POLICY_MOUNT_PATH             ?= /etc/app_protect/conf/policies ## Path inside container where compiled policies will be mounted
 COMPILE_POLICIES              ?= false ## Set to true to compile and include policies in the image build
+INCLUDE_POLICIES              ?= false ## Set to true to include pre-compiled policies in the image build
+POLICY_MOUNT_DIR              ?= /etc/nginx/app_protect/policies ## Directory in container where policies will be mounted
+POLICY_FILES                  := $(wildcard $(POLICY_DIR)/*.json) ## JSON policy files to compile
 
 # Additional flags added here can be accessed in main.go.
 # e.g. `main.version` maps to `var version` in main.go
@@ -142,23 +145,42 @@ pull-nap-v5-image: ## Pull NGINX App Protect V5 container image
 .PHONY: compile-policies-for-build
 compile-policies-for-build: validate-policy-files pull-nap-v5-image
 	@printf "Compiling policies for container build...\n"
-	@for policy in $(POLICY_FILES); do \
-		POLICY_NAME=$$(basename $$policy .json); \
-		printf "Compiling: $$policy -> $(COMPILED_POLICY_DIR)/$$POLICY_NAME.tgz\n"; \
-		docker run --platform linux/$(strip $(ARCH)) --rm \
-			-v "$$(pwd):$$(pwd)" \
-			--workdir "$$(pwd)" \
-			$(NAP_V5_COMPILER_IMAGE) \
-			-p "$$(pwd)/$$policy" \
-			-o "$$(pwd)/$(COMPILED_POLICY_DIR)/$$POLICY_NAME.tgz" || { \
-				echo "✗ Failed to compile $$policy"; exit 1; }; \
-		printf "✓ Compiled: $$policy\n"; \
-	done
+	@if [ "${COMPILE_POLICIES}" = "true" ]; then \
+		mkdir -p $(COMPILED_POLICY_DIR) && \
+		for policy in $(POLICY_FILES); do \
+			POLICY_NAME=$$(basename $$policy .json); \
+			printf "Compiling: $$policy -> $(COMPILED_POLICY_DIR)/$$POLICY_NAME.tgz\n"; \
+			docker run --platform linux/$(strip $(ARCH)) --rm \
+				-v "$$(pwd):$$(pwd)" \
+				--workdir "$$(pwd)" \
+				$(NAP_V5_COMPILER_IMAGE) \
+				-p "$$(pwd)/$$policy" \
+				-o "$$(pwd)/$(COMPILED_POLICY_DIR)/$$POLICY_NAME.tgz" || { \
+					echo "✗ Failed to compile $$policy"; exit 1; }; \
+			printf "✓ Compiled: $$policy\n"; \
+		done; \
+	fi
 	@printf "\033[0;32mSuccess\033[0m: All policies compiled for container build\n"
+
+.PHONY: debian-image-nap-v5-plus
+debian-image-nap-v5-plus: build ## Create Debian NAP V5 image
+ifeq ($(strip $(COMPILE_POLICIES)),true)
+	@$(MAKE) compile-policies-for-build
+endif
+	$(DOCKER_CMD) $(PLUS_ARGS) \
+	--build-arg BUILD_OS=debian-plus-nap-v5 \
+	--build-arg NAP_MODULES=waf \
+	--build-arg NGINX_AGENT=$(NGINX_AGENT) \
+	--build-arg WAF_VERSION=v5 \
+	$(if $(strip $(COMPILE_POLICIES)), \
+	--build-arg INCLUDE_POLICIES=true \
+	--build-arg POLICY_MOUNT_DIR=/etc/nginx/app_protect/policies \
+	--build-context policies=$(COMPILED_POLICY_DIR))
 
 .PHONY: debian-image-nap-v5-plus-with-policies
 debian-image-nap-v5-plus-with-policies: ## Create Debian NAP V5 image with pre-compiled policies
-	@$(MAKE) COMPILE_POLICIES=true debian-image-nap-v5-plus
+	@$(MAKE) COMPILE_POLICIES=true compile-policies-for-build
+	@$(MAKE) debian-image-nap-v5-plus BUILD_ARGS="--build-arg COMPILE_POLICIES=true --build-arg INCLUDE_POLICIES=true --build-arg POLICY_MOUNT_DIR=/etc/nginx/app_protect/policies"
 
 .PHONY: compile-policy
 compile-policy: validate-policy-files pull-nap-v5-image ## Compile a single JSON policy file (requires POLICY_FILE variable)
@@ -277,7 +299,9 @@ build-goreleaser: ## Build Ingress Controller binary using GoReleaser
 
 .PHONY: debian-image
 debian-image: build ## Create Docker image for Ingress Controller (Debian)
-	$(DOCKER_CMD) --build-arg BUILD_OS=debian
+	$(DOCKER_CMD) --build-arg BUILD_OS=debian --build-arg POLICY_MOUNT_DIR=$(POLICY_MOUNT_DIR) --build-arg COMPILE_POLICIES=$(COMPILE_POLICIES) --build-arg INCLUDE_POLICIES=$(INCLUDE_POLICIES)
+
+
 
 .PHONY: alpine-image
 alpine-image: build ## Create Docker image for Ingress Controller (Alpine)
@@ -309,25 +333,6 @@ debian-image-plus: build ## Create Docker image for Ingress Controller (Debian w
 .PHONY: debian-image-nap-plus
 debian-image-nap-plus: build ## Create Docker image for Ingress Controller (Debian with NGINX Plus and NGINX App Protect WAF)
 	$(DOCKER_CMD) $(PLUS_ARGS) --build-arg BUILD_OS=debian-plus-nap --build-arg NAP_MODULES=waf --build-arg NGINX_AGENT=$(NGINX_AGENT)
-
-.PHONY: debian-image-nap-v5-plus
-debian-image-nap-v5-plus: build ## Create Docker image for Ingress Controller (Debian with NGINX Plus and NGINX App Protect WAFv5)
-ifeq ($(strip $(COMPILE_POLICIES)),true)
-	@$(MAKE) compile-policies-for-build
-	$(DOCKER_CMD) $(PLUS_ARGS) \
-	--build-arg BUILD_OS=debian-plus-nap-v5 \
-	--build-arg NAP_MODULES=waf \
-	--build-arg NGINX_AGENT=$(NGINX_AGENT) \
-	--build-arg WAF_VERSION=v5 \
-	--build-arg INCLUDE_POLICIES=true \
-	--build-arg POLICY_MOUNT_PATH=$(POLICY_MOUNT_PATH)
-else
-	$(DOCKER_CMD) $(PLUS_ARGS) \
-	--build-arg BUILD_OS=debian-plus-nap-v5 \
-	--build-arg NAP_MODULES=waf \
-	--build-arg NGINX_AGENT=$(NGINX_AGENT) \
-	--build-arg WAF_VERSION=v5
-endif
 
 .PHONY: debian-image-dos-plus
 debian-image-dos-plus: build ## Create Docker image for Ingress Controller (Debian with NGINX Plus and NGINX App Protect DoS)
