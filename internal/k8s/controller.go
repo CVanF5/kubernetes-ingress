@@ -2483,7 +2483,12 @@ func (lbc *LoadBalancerController) createIngressEx(ing *networking.Ingress, vali
 	}
 
 	for _, rule := range ing.Spec.Rules {
-		if !validHosts[rule.Host] {
+		// Empty-host rules need their endpoints resolved even though they don't
+		// own a host slot — the configurator-level aggregator merges them into
+		// 00-default-server.conf and needs the resolved endpoint IPs.
+		if rule.Host == "" && lbc.configuration.allowEmptyIngressHost {
+			// fall through to endpoint resolution
+		} else if !validHosts[rule.Host] {
 			nl.Debugf(lbc.Logger, "Skipping host %s for Ingress %s", rule.Host, ing.Name)
 			continue
 		}

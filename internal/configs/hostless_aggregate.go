@@ -169,7 +169,7 @@ func renderHostlessAggregate(
 	}
 	b.WriteString("\n")
 	b.WriteString("    server_name _;\n")
-	b.WriteString("    status_zone _;\n")
+	// status_zone is Plus-only; omitted from this PoC.
 
 	if static.SSLRejectHandshake {
 		b.WriteString("    ssl_reject_handshake on;\n")

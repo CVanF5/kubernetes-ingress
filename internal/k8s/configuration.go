@@ -1113,6 +1113,36 @@ func (c *Configuration) rebuildHosts() ([]ResourceChange, []ConfigurationProblem
 			changes[i].Resource = r
 		}
 	}
+
+	// Hostless Ingresses do not participate in host-keyed change detection (their
+	// rules don't register a host slot under aggregation). Emit a synthetic
+	// AddOrUpdate change for each so the configurator's per-Ingress pipeline runs
+	// — which in turn triggers syncHostlessAggregateConfig to rerender the
+	// shared 00-default-server.conf with cumulative state.
+	if c.allowEmptyIngressHost {
+		alreadyChanged := make(map[string]bool, len(changes))
+		for _, ch := range changes {
+			alreadyChanged[ch.Resource.GetKeyWithKind()] = true
+		}
+		for _, key := range getSortedResourceKeys(newResources) {
+			r := newResources[key]
+			ingConfig, ok := r.(*IngressConfiguration)
+			if !ok {
+				continue
+			}
+			if !hasEmptyHostRuleSpec(&ingConfig.Ingress.Spec) {
+				continue
+			}
+			if alreadyChanged[r.GetKeyWithKind()] {
+				continue
+			}
+			changes = append(changes, ResourceChange{
+				Op:       AddOrUpdate,
+				Resource: r,
+			})
+		}
+	}
+
 	newProblems := make(map[string]ConfigurationProblem)
 
 	c.addProblemsForResourcesWithoutActiveHost(newResources, newProblems)
@@ -1126,6 +1156,18 @@ func (c *Configuration) rebuildHosts() ([]ResourceChange, []ConfigurationProblem
 	c.hostProblems = newProblems
 
 	return changes, newOrUpdatedProblems
+}
+
+// hasEmptyHostRuleSpec reports whether the spec contains at least one rule
+// with an empty host. Sibling of validation.go's hasEmptyHostRule, kept here
+// to avoid the package boundary.
+func hasEmptyHostRuleSpec(spec *networking.IngressSpec) bool {
+	for _, rule := range spec.Rules {
+		if rule.Host == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func updateActiveHostsForIngresses(hosts map[string]Resource, resources map[string]Resource) {
@@ -1216,6 +1258,13 @@ func (c *Configuration) addProblemsForResourcesWithoutActiveHost(resources map[s
 					break
 				}
 			}
+			// Under hostless aggregation, an Ingress with only empty-host rules has
+			// ValidHosts[""] = false (the aggregator handles them outside the host
+			// arbitration model). Such Ingresses are still active — don't treat them
+			// as rejected here.
+			if !atLeastOneValidHost && c.allowEmptyIngressHost && hasOnlyEmptyHostRules(impl.Ingress) {
+				continue
+			}
 			if !atLeastOneValidHost {
 				p := ConfigurationProblem{
 					Object:  impl.Ingress,
@@ -1251,6 +1300,19 @@ func (c *Configuration) addProblemsForResourcesWithoutActiveHost(resources map[s
 			}
 		}
 	}
+}
+
+// hasOnlyEmptyHostRules reports whether every rule on the Ingress has an empty host.
+func hasOnlyEmptyHostRules(ing *networking.Ingress) bool {
+	if len(ing.Spec.Rules) == 0 {
+		return false
+	}
+	for _, rule := range ing.Spec.Rules {
+		if rule.Host != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Configuration) addWarningsForVirtualServersWithMissConfiguredListeners(resources map[string]Resource) {

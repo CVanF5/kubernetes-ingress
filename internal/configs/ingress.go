@@ -353,6 +353,13 @@ func generateNginxCfg(ncp NginxCfgParams) (version1.IngressNginxConfig, Warnings
 	}
 
 	for _, rule := range ncp.ingEx.Ingress.Spec.Rules {
+		// Empty-host rules are aggregated into 00-default-server.conf by the
+		// configurator-level aggregator when --allow-empty-ingress-host is on.
+		// Skip them in the per-Ingress render to avoid emitting an invalid
+		// `server_name ""` block.
+		if rule.Host == "" && ncp.staticParams != nil && ncp.staticParams.AllowEmptyIngressHost {
+			continue
+		}
 		// skipping invalid hosts
 		if !ncp.ingEx.ValidHosts[rule.Host] {
 			continue
