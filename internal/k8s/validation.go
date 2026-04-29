@@ -631,6 +631,7 @@ func validateIngress(
 	internalRoutesEnabled bool,
 	snippetsEnabled bool,
 	directiveAutoAdjust bool,
+	allowEmptyHost bool,
 ) field.ErrorList {
 	allErrs := validateIngressAnnotations(
 		IngressOpts{
@@ -646,7 +647,10 @@ func validateIngress(
 		field.NewPath("annotations"),
 	)
 
-	allErrs = append(allErrs, validateIngressSpec(&ing.Spec, field.NewPath("spec"))...)
+	allErrs = append(allErrs, validateIngressSpec(&ing.Spec, field.NewPath("spec"), allowEmptyHost)...)
+	if allowEmptyHost && hasEmptyHostRule(&ing.Spec) {
+		allErrs = append(allErrs, validateHostlessIngress(ing, field.NewPath("spec"))...)
+	}
 
 	if isMaster(ing) {
 		allErrs = append(allErrs, validateMasterSpec(&ing.Spec, field.NewPath("spec"))...)
@@ -1042,7 +1046,7 @@ func validateIsValidRealm(v string) error {
 	return nil
 }
 
-func validateIngressSpec(spec *networking.IngressSpec, fieldPath *field.Path) field.ErrorList {
+func validateIngressSpec(spec *networking.IngressSpec, fieldPath *field.Path, allowEmptyHost bool) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if spec.DefaultBackend != nil {
@@ -1050,6 +1054,7 @@ func validateIngressSpec(spec *networking.IngressSpec, fieldPath *field.Path) fi
 	}
 
 	allHosts := sets.Set[string]{}
+	hasEmptyHost := false
 
 	if len(spec.Rules) == 0 {
 		return append(allErrs, field.Required(fieldPath.Child("rules"), ""))
@@ -1059,7 +1064,13 @@ func validateIngressSpec(spec *networking.IngressSpec, fieldPath *field.Path) fi
 		idxRule := fieldPath.Child("rules").Index(i)
 
 		if r.Host == "" {
-			allErrs = append(allErrs, field.Required(idxRule.Child("host"), ""))
+			if !allowEmptyHost {
+				allErrs = append(allErrs, field.Required(idxRule.Child("host"), ""))
+			} else if hasEmptyHost {
+				allErrs = append(allErrs, field.Duplicate(idxRule.Child("host"), ""))
+			} else {
+				hasEmptyHost = true
+			}
 		} else if allHosts.Has(r.Host) {
 			allErrs = append(allErrs, field.Duplicate(idxRule.Child("host"), r.Host))
 		} else {
@@ -1079,6 +1090,33 @@ func validateIngressSpec(spec *networking.IngressSpec, fieldPath *field.Path) fi
 		}
 	}
 
+	return allErrs
+}
+
+// hasEmptyHostRule reports whether the spec contains at least one rule with an empty host.
+func hasEmptyHostRule(spec *networking.IngressSpec) bool {
+	for _, rule := range spec.Rules {
+		if rule.Host == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateHostlessIngress applies the additional restrictions on Ingresses that
+// participate in the hostless aggregation: spec.tls and spec.defaultBackend are
+// controller-owned and cannot be configured per-Ingress when the catch-all server
+// is shared across multiple Ingresses.
+func validateHostlessIngress(ing *networking.Ingress, specPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if len(ing.Spec.TLS) > 0 {
+		allErrs = append(allErrs, field.Forbidden(specPath.Child("tls"),
+			"hostless Ingress cannot configure TLS; the catch-all default server certificate is controller-owned"))
+	}
+	if ing.Spec.DefaultBackend != nil {
+		allErrs = append(allErrs, field.Forbidden(specPath.Child("defaultBackend"),
+			"hostless Ingress cannot configure defaultBackend; the catch-all fallback is controller-owned"))
+	}
 	return allErrs
 }
 

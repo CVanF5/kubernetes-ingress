@@ -80,7 +80,7 @@ func TestValidateIngress_WithValidPathRegexValuesForNGINXPlus(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false)
+			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false, false)
 			if len(allErrs) != 0 {
 				t.Errorf("want no errors, got %+v\n", allErrs)
 			}
@@ -155,7 +155,7 @@ func TestValidateIngress_WithValidPathRegexValuesForNGINX(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false)
+			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false, false)
 			if len(allErrs) != 0 {
 				t.Errorf("want no errors, got %+v\n", allErrs)
 			}
@@ -212,7 +212,7 @@ func TestValidateIngress_WithInvalidPathRegexValuesForNGINXPlus(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false)
+			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false, false)
 			if len(allErrs) == 0 {
 				t.Error("want errors on invalid path regex values")
 			}
@@ -270,7 +270,7 @@ func TestValidateIngress_WithInvalidPathRegexValuesForNGINX(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false)
+			allErrs := validateIngress(tc.ingress, tc.isPlus, false, false, false, false, false, false)
 			if len(allErrs) == 0 {
 				t.Error("want errors on invalid path regex values")
 			}
@@ -393,7 +393,7 @@ func TestValidateIngress(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		allErrs := validateIngress(test.ing, test.isPlus, test.appProtectEnabled, test.appProtectDosEnabled, test.internalRoutesEnabled, false, false)
+		allErrs := validateIngress(test.ing, test.isPlus, test.appProtectEnabled, test.appProtectDosEnabled, test.internalRoutesEnabled, false, false, false)
 		assertion := assertErrors("validateIngress()", test.msg, allErrs, test.expectedErrors)
 		if assertion != "" {
 			t.Error(assertion)
@@ -4496,7 +4496,7 @@ func TestValidateIngressSpec(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		allErrs := validateIngressSpec(test.spec, field.NewPath("spec"))
+		allErrs := validateIngressSpec(test.spec, field.NewPath("spec"), false)
 		assertion := assertErrorTypes(test.msg, allErrs, test.expectedErrors)
 		if assertion != "" {
 			t.Error(assertion)

@@ -1266,6 +1266,7 @@ func GenerateNginxMainConfig(staticCfgParams *StaticConfigParams, config *Config
 		DynamicSSLReloadEnabled: staticCfgParams.DynamicSSLReload,
 		StaticSSLPath:           staticCfgParams.StaticSSLPath,
 		NginxVersion:            staticCfgParams.NginxVersion,
+		AllowEmptyIngressHost:   staticCfgParams.AllowEmptyIngressHost,
 	}
 	return nginxCfg
 }

@@ -175,6 +175,14 @@ http {
     include oidc/oidc_common.conf;
     {{- end}}
 
+{{if .AllowEmptyIngressHost}}
+    # default_server is owned by the hostless aggregate (00-default-server.conf).
+    map $http_upgrade $default_connection_header { default ""; }
+    map $http_host $resource_type { default ""; }
+    map $http_host $resource_name { default ""; }
+    map $http_host $resource_namespace { default ""; }
+    map $http_host $service { default ""; }
+{{else}}
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -228,6 +236,7 @@ http {
             return {{.DefaultServerReturn}};
         }
     }
+    {{- end}}
 
     {{- if .NginxStatus}}
     # NGINX Plus APIs

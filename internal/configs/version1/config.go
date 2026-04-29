@@ -351,6 +351,7 @@ type MainConfig struct {
 	DynamicSSLReloadEnabled            bool
 	StaticSSLPath                      string
 	NginxVersion                       nginx.Version
+	AllowEmptyIngressHost              bool
 }
 
 // NewUpstreamWithDefaultServer creates an upstream with the default server.

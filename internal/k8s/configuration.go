@@ -413,6 +413,7 @@ type Configuration struct {
 	isCertManagerEnabled         bool
 	isIPV6Disabled               bool
 	isDirectiveAutoadjustEnabled bool
+	allowEmptyIngressHost        bool
 
 	lock sync.RWMutex
 }
@@ -432,6 +433,7 @@ func NewConfiguration(
 	isCertManagerEnabled bool,
 	isIPV6Disabled bool,
 	isDirectiveAutoadjustEnabled bool,
+	allowEmptyIngressHost bool,
 ) *Configuration {
 	policyServiceRefs := make(map[string]string)
 	return &Configuration{
@@ -462,6 +464,7 @@ func NewConfiguration(
 		isCertManagerEnabled:         isCertManagerEnabled,
 		isIPV6Disabled:               isIPV6Disabled,
 		isDirectiveAutoadjustEnabled: isDirectiveAutoadjustEnabled,
+		allowEmptyIngressHost:        allowEmptyIngressHost,
 	}
 }
 
@@ -476,7 +479,7 @@ func (c *Configuration) AddOrUpdateIngress(ing *networking.Ingress) ([]ResourceC
 	if !c.hasCorrectIngressClass(ing) {
 		delete(c.ingresses, key)
 	} else {
-		validationError = validateIngress(ing, c.isPlus, c.appProtectEnabled, c.appProtectDosEnabled, c.internalRoutesEnabled, c.snippetsEnabled, c.isDirectiveAutoadjustEnabled).ToAggregate()
+		validationError = validateIngress(ing, c.isPlus, c.appProtectEnabled, c.appProtectDosEnabled, c.internalRoutesEnabled, c.snippetsEnabled, c.isDirectiveAutoadjustEnabled, c.allowEmptyIngressHost).ToAggregate()
 		if validationError != nil {
 			delete(c.ingresses, key)
 		} else {
@@ -1133,7 +1136,14 @@ func updateActiveHostsForIngresses(hosts map[string]Resource, resources map[stri
 		}
 
 		for _, rule := range ingConfig.Ingress.Spec.Rules {
-			res := hosts[rule.Host]
+			res, exists := hosts[rule.Host]
+			if !exists {
+				// Hostless rules under empty-host aggregation are not registered in
+				// hosts; mark ValidHosts[""] = false so the per-Ingress renderer skips
+				// them. The aggregator handles them separately.
+				ingConfig.ValidHosts[rule.Host] = false
+				continue
+			}
 			ingConfig.ValidHosts[rule.Host] = res.GetKeyWithKind() == r.GetKeyWithKind()
 		}
 	}
@@ -1534,6 +1544,14 @@ func (c *Configuration) buildHostsAndResources() (newHosts map[string]Resource, 
 		newResources[resource.GetKeyWithKind()] = resource
 
 		for _, rule := range ing.Spec.Rules {
+			// Hostless rules are aggregated by Configurator.syncHostlessAggregateConfig, not
+			// arbitrated as a host slot here. Skip the per-host registration so multiple hostless
+			// Ingresses can coexist; the per-Ingress renderer will see ValidHosts[""] == false and
+			// omit the empty-host rule from the per-Ingress file.
+			if rule.Host == "" && c.allowEmptyIngressHost {
+				continue
+			}
+
 			holder, exists := newHosts[rule.Host]
 			if !exists {
 				newHosts[rule.Host] = resource

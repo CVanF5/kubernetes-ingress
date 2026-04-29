@@ -123,6 +123,17 @@ http {
     {{- end}}
     {{- end}}
 
+{{if .AllowEmptyIngressHost}}
+    # default_server is owned by the hostless aggregate (00-default-server.conf).
+    # The websocket / resource-tracking variables that the static default-server
+    # used to set explicitly are provided as global maps so per-Ingress servers
+    # continue to resolve them.
+    map $http_upgrade $default_connection_header { default ""; }
+    map $http_host $resource_type { default ""; }
+    map $http_host $resource_name { default ""; }
+    map $http_host $resource_namespace { default ""; }
+    map $http_host $service { default ""; }
+{{else}}
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -176,6 +187,7 @@ http {
             return {{.DefaultServerReturn}};
         }
     }
+    {{- end}}
 
     {{- if .NginxStatus}}
     # stub_status

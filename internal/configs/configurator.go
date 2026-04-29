@@ -464,6 +464,9 @@ func (cnf *Configurator) addOrUpdateIngress(ingEx *IngressEx) (bool, Warnings, e
 	if (cnf.isPlus && cnf.isPrometheusEnabled) || cnf.isLatencyMetricsEnabled {
 		cnf.updateIngressMetricsLabels(ingEx, nginxCfg.Upstreams)
 	}
+	if err := cnf.syncHostlessAggregateConfig(); err != nil {
+		return configChanged, warnings, fmt.Errorf("error syncing hostless aggregate after ingress %v: %w", name, err)
+	}
 	return configChanged, warnings, nil
 }
 
@@ -537,6 +540,9 @@ func (cnf *Configurator) addOrUpdateMergeableIngress(mergeableIngs *MergeableIng
 
 	if (cnf.isPlus && cnf.isPrometheusEnabled) || cnf.isLatencyMetricsEnabled {
 		cnf.updateIngressMetricsLabels(mergeableIngs.Master, nginxCfg.Upstreams)
+	}
+	if err := cnf.syncHostlessAggregateConfig(); err != nil {
+		return changed, warnings, fmt.Errorf("error syncing hostless aggregate after mergeable ingress %v: %w", name, err)
 	}
 
 	return changed, warnings, nil
@@ -1057,6 +1063,10 @@ func (cnf *Configurator) DeleteIngress(key string, skipReload bool) error {
 
 	if (cnf.isPlus && cnf.isPrometheusEnabled) || cnf.isLatencyMetricsEnabled {
 		cnf.deleteIngressMetricsLabels(key)
+	}
+
+	if err := cnf.syncHostlessAggregateConfig(); err != nil {
+		return fmt.Errorf("error syncing hostless aggregate after deleting ingress %v: %w", key, err)
 	}
 
 	if !skipReload {

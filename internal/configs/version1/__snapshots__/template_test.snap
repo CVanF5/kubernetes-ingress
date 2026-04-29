@@ -62,6 +62,7 @@ http {
         ''      $default_connection_header;
     }
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -203,6 +204,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -343,6 +345,7 @@ http {
     
     
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -481,6 +484,7 @@ http {
 
     
     
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -621,6 +625,7 @@ http {
 
     
     
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -3902,6 +3907,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -4045,6 +4051,7 @@ http {
 
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -4190,6 +4197,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -4334,6 +4342,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -4477,6 +4486,7 @@ http {
 
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -4655,6 +4665,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -4812,6 +4823,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -4959,6 +4971,7 @@ http {
     keyval_zone zone=oidc_sids:5M timeout=120s sync;
     include oidc/oidc_common.conf;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -5102,6 +5115,7 @@ http {
     keyval_zone zone=refresh_tokens:1M timeout=8h sync;
     keyval_zone zone=oidc_sids:1M timeout=8h sync;
     include oidc/oidc_common.conf;
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -5260,6 +5274,7 @@ http {
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -5403,6 +5418,7 @@ http {
 
     resolver example.com 127.0.0.1 valid=10s ipv6=off;
     resolver_timeout 15s;
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -5560,6 +5576,7 @@ http {
         ''      $default_connection_header;
     }
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -5679,6 +5696,7 @@ http {
         default upgrade;
         ''      $default_connection_header;
     }
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -5800,6 +5818,7 @@ http {
         ''      $default_connection_header;
     }
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -5920,6 +5939,7 @@ http {
         ''      $default_connection_header;
     }
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -6039,6 +6059,7 @@ http {
         default upgrade;
         ''      $default_connection_header;
     }
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -6179,6 +6200,7 @@ http {
         ''      $default_connection_header;
     }
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -6298,6 +6320,7 @@ http {
         default upgrade;
         ''      $default_connection_header;
     }
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -6431,6 +6454,7 @@ http {
 
     
     
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -6569,6 +6593,7 @@ http {
 
     
     
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -6715,6 +6740,7 @@ http {
     
     
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -6859,6 +6885,7 @@ http {
 
     
     
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
@@ -7005,6 +7032,7 @@ http {
     
     
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -7149,6 +7177,7 @@ http {
     
     
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -7292,6 +7321,7 @@ http {
         ''      $default_connection_header;
     }
 
+
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes
         set $default_connection_header "";
@@ -7411,6 +7441,7 @@ http {
         default upgrade;
         ''      $default_connection_header;
     }
+
 
     server {
         # required to support the Websocket protocol in VirtualServer/VirtualServerRoutes

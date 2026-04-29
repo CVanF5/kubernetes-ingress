@@ -47,6 +47,7 @@ func createTestConfiguration() *Configuration {
 		certManagerEnabled,
 		isIPV6Disabled,
 		isDirectiveAutoadjustEnabled,
+		false, // allowEmptyIngressHost
 	)
 }
 
