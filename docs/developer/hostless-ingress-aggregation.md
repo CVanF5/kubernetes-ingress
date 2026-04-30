@@ -6,9 +6,9 @@ The Kubernetes Ingress spec permits rules with no `host` field, with the semanti
 
 The constraint is real (`ngx_http.c:1305-1318`: writing `default_server` on two `listen` directives for the same `address:port` is `EMERG` at config-load time), but it bounds the **rendered NGINX config**, not the **set of Ingress resources**. The community ingress-nginx controller demonstrates that N hostless Ingresses across N namespaces can be supported by emitting a single `server { listen 80 default_server; server_name _; ... }` block and merging paths from all hostless Ingresses into it. The constraint is satisfied because there is still only one `default_server` block; it just happens to contain locations sourced from many Ingress objects.
 
-The current PoC (PR #9614) takes a strictly weaker approach: at most one Ingress in the cluster claims the empty-host slot (oldest wins via `chooseObjectMetaWinner`); subsequent hostless Ingresses are silently ignored. This diverges from ingress-nginx semantics and breaks common multi-tenant patterns where multiple teams contribute paths under a shared catch-all server.
+PR #9614 establishes the foundation: a feature flag, the synthetic file slot at `00-default-server.conf`, an `IsDefaultServer` flag on the per-Ingress server template, validation hooks, and a single-Ingress claim model. That work is the right starting point. It proves the file-slot mechanism, the template surgery, and the validation contract.
 
-This design extends the PoC to **aggregate** all hostless Ingresses into a single rendered server, matching ingress-nginx behavior, while preserving NGINX's physical constraint and NGIC's existing arbitration model.
+This design **builds on** that foundation by generalising the single-claim model into an aggregation model: instead of one Ingress owning the empty-host slot, all hostless Ingresses contribute paths to a single shared `default_server` block. Path-level arbitration replaces Ingress-level arbitration, matching the multi-tenant catch-all pattern users have asked for since 2017 and the behaviour the community ingress-nginx controller already provides. NGINX's physical constraint is preserved: there is still exactly one `default_server` block per `address:port`; it simply contains locations sourced from many Ingress objects.
 
 ## Goals
 
@@ -27,7 +27,7 @@ This design extends the PoC to **aggregate** all hostless Ingresses into a singl
 - Not introducing per-Ingress TLS for the catch-all server. The catch-all uses the controller's default secret (`/etc/nginx/secrets/default`) or `ssl_reject_handshake`, as today's static block does.
 - Not changing path-conflict semantics for hosted Ingresses. The aggregate's path arbitration applies only to its own members.
 - Not auto-promoting hostless Ingresses to mergeable-ingress masters. The mergeable-ingress mechanism (`nginx.org/mergeable-ingress-type`) is forbidden on hostless Ingresses.
-- Not removing the existing single-claim PoC code as a separate phase. This design replaces it.
+- Not shipping as a separate parallel implementation. This design generalises PR #9614's single-claim sync into a multi-member aggregator; the file slot, feature flag, validation hooks, and template flags carry over directly.
 
 ## Current Behavior
 
@@ -63,34 +63,48 @@ This block is the only catch-all today. It cannot be customized per Ingress; it 
 
 ## Resource Model
 
+There are two viable shapes for representing the aggregate inside the Configuration layer. The PoC validates the second; the first remains the cleaner long-term option.
+
+### Option 1: Aggregate as a Resource type (cleaner, more surgery)
+
 A new type representing the cluster-wide aggregate:
 
 ```go
 // HostlessAggregateConfiguration represents the union of all Ingress rules
 // with no host, rendered as NGINX's single default_server block.
 type HostlessAggregateConfiguration struct {
-    // Members holds the Ingresses contributing to the aggregate, sorted
-    // by chooseObjectMetaWinner (oldest first) for stable rendering.
-    Members []*networking.Ingress
-
-    // PathOwners maps each path to the Ingress that won arbitration for it.
-    // Ingresses whose paths lost arbitration still appear in Members but
-    // contribute no locations to the rendered config.
+    Members    []*networking.Ingress
     PathOwners map[string]*networking.Ingress
-
-    // Warnings includes path-conflict warnings (one per conflict).
-    Warnings []string
+    Warnings   []string
 }
 ```
 
-`HostlessAggregateConfiguration` implements `Resource` with synthetic identity:
+Implements `Resource`, registered at `c.hosts[""]`, fires `AddOrUpdate` change events when its identity changes via the existing `IsEqual`-driven detection. Downside: `processChanges` in `controller.go` dispatches by resource type (Ingress / VirtualServer / TransportServer); adding a fourth type means controller surgery and a new branch through `Configurator`.
 
-- `GetObjectMeta()` returns the `ObjectMeta` of the oldest member, used only for `Wins()` semantics. The aggregate cannot collide with hosted resources (no hostname can equal the empty string), so `Wins()` is never invoked across the aggregate boundary.
-- `GetKeyWithKind()` returns the literal string `HostlessAggregate/`, distinct from any real Ingress key.
+### Option 2: Synthetic AddOrUpdate events for member Ingresses (PoC choice)
 
-The aggregate is registered at `c.hosts[""]` exactly once per reconcile cycle, after all hostless Ingresses have been collected.
+`rebuildHosts` emits a synthetic `AddOrUpdate` change for every Ingress with at least one empty-host rule. Each member flows through the existing per-Ingress pipeline (`createIngressEx` → `Configurator.AddOrUpdateIngress`); the aggregator hook in `addOrUpdateIngress` rerenders `00-default-server.conf` from cumulative state. No new resource type, no controller dispatcher changes.
 
-`IngressEx.ValidHosts[""]` is set to `true` on every Ingress contributing at least one path to the aggregate (i.e., every Ingress with at least one hostless rule that won arbitration for at least one path). This drives downstream rendering — an Ingress with `ValidHosts[""] == true` is included as a member of the aggregate, and any of its hosted rules continue to render to its per-Ingress file as today.
+Trade-offs:
+
+- **Pro**: minimal pipeline surgery; existing event/status/warning machinery applies to each member for free.
+- **Pro**: existing endpoint, secret, and policy resolution on the IngressEx all run unchanged.
+- **Con**: aggregator runs N times per batch when N hostless Ingresses change together (idempotent but wasteful; debouncing is a follow-up).
+- **Con**: changes are emitted unconditionally on every reconcile rather than gated by "did the aggregate actually change", causing extra reload work in pathological cases.
+
+The PoC ships Option 2. A production implementation may upgrade to Option 1 for tighter change detection, or keep Option 2 with debouncing.
+
+### IngressEx.ValidHosts under either option
+
+`ValidHosts[""]` is `false` for hostless Ingresses regardless of which option is used. The aggregator walks `cnf.ingresses` directly and ignores `ValidHosts[""]`. The per-Ingress renderer (`generateNginxCfg`) explicitly skips empty-host rules under the flag so per-Ingress files don't emit invalid `server_name ""` blocks. Per-Ingress files for purely-hostless Ingresses end up containing only the comment header. Cosmetic wart, harmless.
+
+### Cross-cutting use of ValidHosts in the controller
+
+`createIngressEx` (`internal/k8s/controller.go`) iterates `ing.Spec.Rules` and skips rules where `!validHosts[rule.Host]` for the purpose of endpoint resolution. With `ValidHosts[""] = false`, that path skips endpoint resolution for hostless rules, leaving `IngressEx.Endpoints[svcKey]` empty and the aggregator rendering placeholder upstream addresses (`127.0.0.1:8181`). The carve-out: empty-host rules under the flag bypass the `validHosts` gate in `createIngressEx`. This is a real instance of `ValidHosts` carrying a second contract beyond rendering, worth documenting and respecting in any future refactor.
+
+### Rejection-path carve-out
+
+`Configuration.addProblemsForResourcesWithoutActiveHost` flags any Ingress whose every host slot lost arbitration as `Rejected: All hosts are taken by other resources`. With `ValidHosts[""] = false` for hostless Ingresses, this check incorrectly rejects them. The carve-out: when the flag is on and the Ingress has only empty-host rules, skip the rejection.
 
 ## Aggregation Semantics
 
@@ -100,7 +114,7 @@ The aggregate is registered at `c.hosts[""]` exactly once per reconcile cycle, a
 
 **Cross-namespace is invisible to arbitration.** `chooseObjectMetaWinner` compares creation timestamps and UIDs, neither of which is namespace-scoped. Two Ingresses in different namespaces with the same path are arbitrated identically to two in the same namespace.
 
-**Member ordering is stable.** `Members` is sorted by `chooseObjectMetaWinner` order so the rendered file is deterministic given the same cluster state. This matters for reload skipping in `ConfigRollbackManager` — byte-identical output across reconciliations skips `nginx -t` and `nginx -s reload`.
+**Member ordering is stable.** `Members` is sorted by `chooseObjectMetaWinner` order so the rendered file is deterministic given the same cluster state. This matters for reload skipping in `ConfigRollbackManager`: byte-identical output across reconciliations skips `nginx -t` and `nginx -s reload`.
 
 **Path conflicts surface as warnings, not validation errors.** Two hostless Ingresses are valid in isolation; the conflict is a dynamic property of the cluster. A path conflict produces a `kubectl events`-visible warning on the losing Ingress, not a rejection. The losing Ingress remains in `Configuration.ingresses` and continues to contribute any non-conflicting paths it has.
 
@@ -111,7 +125,7 @@ The aggregate is registered at `c.hosts[""]` exactly once per reconcile cycle, a
 Two hostless Ingresses in different namespaces:
 
 ```yaml
-# team-a/api-ingress  — created at 2026-04-29T10:00:00Z
+# team-a/api-ingress (created at 2026-04-29T10:00:00Z)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -137,7 +151,7 @@ spec:
             port:
               number: 8080
 ---
-# team-b/web-ingress  — created at 2026-04-29T10:05:00Z
+# team-b/web-ingress (created at 2026-04-29T10:05:00Z)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -164,7 +178,7 @@ spec:
               number: 80
 ```
 
-Neither has a `host` field. Both are picked up because `--allow-empty-ingress-host=true`. All four paths are unique across the two Ingresses, so arbitration is trivial — both Ingresses contribute all their paths.
+Neither has a `host` field. Both are picked up because `--allow-empty-ingress-host=true`. All four paths are unique across the two Ingresses, so arbitration is trivial: both Ingresses contribute all their paths.
 
 `Configuration.buildHostsAndResources` registers a single `HostlessAggregateConfiguration` at `c.hosts[""]` with two members. `Configurator.syncHostlessAggregateConfig` calls `generateNginxCfgForHostlessIngresses` and writes:
 
@@ -251,7 +265,7 @@ server {
         proxy_pass http://team-b-web-ingress-_-static-svc-80;
     }
 
-    # synthesized fallback — emitted only when no member contributes a "/" path
+    # synthesised fallback (emitted only when no member contributes a "/" path)
     location / {
         return 404;
     }
@@ -261,10 +275,10 @@ server {
 Things to notice:
 
 1. **One `server` block, one `default_server` per listen socket.** NGINX's `address:port` constraint is satisfied. The aggregation is purely at the location/upstream level.
-2. **`server_name _;`** — matches anything. Combined with `default_server` on the listen socket, catches requests with no Host header, raw-IP requests, and SNI mismatches.
+2. **`server_name _;`** matches anything. Combined with `default_server` on the listen socket, catches requests with no Host header, raw-IP requests, and SNI mismatches.
 3. **Upstream names are namespace-prefixed** following the existing `<namespace>-<ingressName>-<host>-<service>-<port>` convention. The empty host is normalised to `_` (per the PoC's `emptyHostToken`). Cross-namespace upstreams coexist without name collision.
 4. **`set $resource_*` is emitted per-location, not per-server.** The synthetic server has no owning Ingress, so server-level attribution would be wrong. Per-location attribution preserves Prometheus `serverZoneLabels` and access-log resource tracking by routing each request to the labels of its source Ingress.
-5. **No server-level annotations.** `server_tokens`, `server_snippets`, `ssl_redirect`, `hsts`, App Protect bindings, JWT/basic-auth realms — all absent. They are forbidden on hostless Ingresses by the annotation contract; if either of these Ingresses had set one, validation would have rejected it before it reached the aggregate.
+5. **No server-level annotations.** `server_tokens`, `server_snippets`, `ssl_redirect`, `hsts`, App Protect bindings, JWT/basic-auth realms are all absent. They are forbidden on hostless Ingresses by the annotation contract; if either of these Ingresses had set one, validation would have rejected it before it reached the aggregate.
 6. **The fallback `location /` is synthesized.** Neither member Ingress claims `/`, so the controller emits `return 404;` (the configured `DefaultServerReturn`). If `team-a/api-ingress` had defined a `/` path, that would have rendered instead and the synthesized fallback would have been suppressed (PoC's existing `HasRootLocation` flag).
 
 ### Path Conflict Variant
@@ -295,7 +309,7 @@ The rendered `00-default-server.conf` is byte-identical to the no-conflict case 
 Warning  HostlessPathConflict  ingress/web-ingress  path /api lost arbitration to team-a/api-ingress (created 5m earlier)
 ```
 
-`team-b`'s other paths (`/web`, `/static`) continue to render normally. The Ingress is partially active — non-conflicting paths serve traffic; conflicting paths are reported and suppressed. This matches ingress-nginx's behavior and follows NGIC's existing model for hosted-resource conflicts.
+`team-b`'s other paths (`/web`, `/static`) continue to render normally. The Ingress is partially active: non-conflicting paths serve traffic; conflicting paths are reported and suppressed. This matches ingress-nginx's behavior and follows NGIC's existing model for hosted-resource conflicts.
 
 If `team-a/api-ingress` is later deleted, the next reconcile re-arbitrates: `team-b/web-ingress`'s `/api` becomes the sole claimant, the warning event is cleared, and `team-b`'s `/api` location appears in the rendered aggregate.
 
@@ -432,6 +446,8 @@ func generateNginxCfgForHostlessIngresses(
 
 The PoC's existing `IsDefaultServer` flag, `HasRootLocation` flag, and template changes in `nginx.ingress.tmpl` / `nginx-plus.ingress.tmpl` are reused unchanged.
 
+**Plus-conditional directives.** `status_zone _;` is emitted only on NGINX Plus (the OSS build does not parse `status_zone` and rejects the config at `nginx -t`). The renderer takes an `isPlus bool` and gates Plus-only directives on it. The PoC currently omits `status_zone` unconditionally; the production version reinstates it under the Plus gate.
+
 ## Validation
 
 `validateIngress(ing, ..., allowEmptyHost)` in `internal/k8s/validation.go`:
@@ -497,11 +513,11 @@ if len(hostlessMembers) > 0 {
 
 `updateActiveHostsForIngresses` (line 1127) is extended: for each Ingress in the aggregate's members, set `IngressEx.ValidHosts[""] = true` if at least one of its paths won arbitration; otherwise `false` and emit a warning that all of its hostless paths lost.
 
-`detectChangesInHosts` requires no change — empty string is a valid map key and the existing host-change detection naturally handles its add/remove/update events.
+`detectChangesInHosts` requires no change. Empty string is a valid map key and the existing host-change detection naturally handles its add/remove/update events.
 
 ## Templates
 
-The per-Ingress server template (`internal/configs/version1/nginx.ingress.tmpl`, `nginx-plus.ingress.tmpl`) gains the PoC's `IsDefaultServer` flag — emits `default_server` on `listen`, `server_name _;`, suppresses per-Ingress `set $resource_*` tracking, conditionally emits `access_log off`, the health-status location, and a fallback `location /` (only when `HasRootLocation == false`). These changes are unchanged from PR #9614.
+The per-Ingress server template (`internal/configs/version1/nginx.ingress.tmpl`, `nginx-plus.ingress.tmpl`) gains the PoC's `IsDefaultServer` flag, which emits `default_server` on `listen`, `server_name _;`, suppresses per-Ingress `set $resource_*` tracking, conditionally emits `access_log off`, the health-status location, and a fallback `location /` (only when `HasRootLocation == false`). These changes are unchanged from PR #9614.
 
 The http-level templates (`nginx.tmpl`, `nginx-plus.tmpl`) gain a conditional around the static default-server block. When `--allow-empty-ingress-host` is off, the block is emitted as today. When on, the block is suppressed and the following maps are added so location-level resource tracking variables resolve when sourced from the aggregate:
 
@@ -544,9 +560,318 @@ Replicas may transiently disagree during a rolling upgrade where the binary vers
 
 - **`spec.defaultBackend` support.** The Kubernetes spec also permits an Ingress with `spec.defaultBackend` and no rules. This design forbids it on hostless Ingresses. A future revision may allow exactly one Ingress in the cluster to define the catch-all `/` location via `defaultBackend`, replacing the controller-emitted fallback. This requires its own arbitration model (one winner, no path merging) and is left out of scope.
 - **Path conflict surfacing.** Today's `Warnings` field on `IngressConfiguration` is per-resource. The aggregate's path conflicts attach to losing Ingresses through `IngressEx.ValidHosts[""] == false`, but a richer `kubectl get ingress` status condition (`HostlessPathConflict`, with the winning resource's namespace/name) would improve operator visibility. Not blocking.
-- **Cert lifecycle for the catch-all.** The default secret is controller-owned. Operators wanting a real certificate for the catch-all (for browsers visiting by IP) configure it via `--default-server-tls-secret`. No declarative per-Ingress override is offered. If demand arises, a future revision could allow exactly one hostless Ingress to designate the catch-all certificate via a dedicated annotation, with the same single-claim arbitration the rest of this design avoids.
+- **Cert lifecycle for the catch-all.** The default secret is controller-owned. Operators wanting a real certificate for the catch-all (for browsers visiting by IP) configure it via `--default-server-tls-secret`. No declarative per-Ingress override is offered. If demand arises, a future revision could allow exactly one hostless Ingress to designate the catch-all certificate via a dedicated annotation. That one resource benefits from PR #9614's original single-claim model, alongside the path-level aggregation this design provides.
 - **Annotation classification CI.** The forbidden-annotation table requires ongoing maintenance as new annotations are added to NGIC. The proposed marker comment (`// hostless: location-only`) plus a `go vet`-style check is one approach; a more robust alternative is to gate the flag on a per-annotation capability registry (deeper refactor).
 - **Mergeable hostless.** A future revision could allow hostless Ingresses to participate in master/minion themselves (an explicit master Ingress with no host, accepting minions). This would let one Ingress control server-level configuration of the catch-all while N minions contribute paths. Out of scope; revisit if user demand for shared server-level configuration on the catch-all materializes.
+- **Endpoint update propagation.** `Configurator.UpdateEndpoints` updates upstream membership (via the NGINX Plus dynamic upstream API on Plus, file rewrite + reload on OSS) without going through `addOrUpdateIngress`. The aggregator hook is on `addOrUpdateIngress`, so endpoint-only changes for hostless backends do not regenerate `00-default-server.conf`. The PoC sidesteps this because the demo applies Ingresses after their backends are ready: endpoints are present at first reconcile. In production with rolling backend deploys, the aggregate would carry stale endpoint IPs until the next full Ingress reconcile (configmap change, Ingress edit, controller restart). Fix: add a parallel hook on `UpdateEndpoints` that calls `syncHostlessAggregateConfig` when any updated endpoint slice belongs to a service referenced by a hostless Ingress. Required before production.
+- **Plus-only directives.** The aggregate currently omits `status_zone` (Plus-only). The full design includes Plus-conditional emission of `status_zone _;` so Plus's per-server status reporting works for the catch-all. The renderer needs an `isPlus` parameter; trivial follow-up.
+- **Aggregator debouncing.** Under Option 2 (synthetic events), the aggregator runs N times per batch with N hostless Ingresses. Each run rewrites `00-default-server.conf` with progressively more members. The `ConfigRollbackManager`'s skip-on-unchanged-content path filters most of the redundant disk writes, but the final reload still happens. Debouncing the aggregator to once per batch (via a "pending sync" flag flushed at end-of-batch) is a quality-of-implementation improvement worth doing before scale-testing.
+
+## PoC Validation
+
+A minimal PoC implementing Option 2 (synthetic events) was deployed to a kind cluster with two hostless Ingresses across `team-a` and `team-b` namespaces. Verified:
+
+- Both Ingresses accepted by validation; neither rejected as "all hosts taken".
+- `/etc/nginx/conf.d/00-default-server.conf` rendered with one `server { listen 80 default_server; ... }` block, two upstreams with real pod IPs (e.g., `server 10.244.0.6:8080 ...`), two locations with per-location `set $resource_namespace`/`$resource_name` attribution, and a synthesised `location / { return 404; }` fallback.
+- Per-Ingress files (`team-a-api-ingress.conf`, `team-b-web-ingress.conf`) contain only the comment header; empty-host rules deliberately suppressed in `generateNginxCfg`.
+- `nginx -t` passes inside the controller pod.
+- `curl http://<svc>/api` → `hello from team-a /api`.
+- `curl http://<svc>/web` → `hello from team-b /web`.
+- `curl http://<svc>/unknown` → 404 from the synthesised fallback.
+- `curl -H 'Host: bogus.example.invalid' http://<svc>/api` → routes to team-a (catch-all behaviour through `default_server`).
+
+Branch: `poc/empty-host-aggregation`, commits `ee6c8a053` (initial) + `9705b3b12` (demo fixes).
+
+Bugs the PoC surfaced that pure-renderer unit tests missed (now fixed in commit `9705b3b12`, documented in this proposal):
+
+1. Hostless Ingresses rejected by `addProblemsForResourcesWithoutActiveHost` because `ValidHosts[""] = false`.
+2. Change detection is host-keyed; without registering empty host as a host slot, no events fire. Solved with synthetic events (Option 2 above).
+3. `createIngressEx` skips endpoint resolution for rules where `!validHosts[rule.Host]`, leaving the aggregate with placeholder upstream addresses.
+4. `status_zone` is Plus-only and breaks `nginx -t` on OSS.
+
+## Reproducing the PoC
+
+Assumes `kind`, `docker`, and `kubectl` are installed, and the working directory is the repository root.
+
+### 0. Create a kind cluster with port mappings
+
+Kind clusters run inside a Docker container with their own network namespace, so NodePort services are not reachable from the host by default. The standard fix is `extraPortMappings` at cluster-create time, paired with `hostPort` on the controller container later. This avoids needing a port-forward at curl time.
+
+```yaml
+# /tmp/kind.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - { containerPort: 80,  hostPort: 8080, protocol: TCP }
+  - { containerPort: 443, hostPort: 8443, protocol: TCP }
+```
+
+```bash
+kind create cluster --config /tmp/kind.yaml
+kubectl cluster-info --context kind-kind
+```
+
+If you have multiple kind clusters, note the cluster name; subsequent `kind load` invocations default to the cluster named `kind` and accept `--name <cluster>` to target a specific one. Recreating an existing cluster requires `kind delete cluster` first.
+
+### 1. Check out the PoC branch and build the OSS image
+
+The Makefile defaults to `ARCH=amd64`. On Apple Silicon Macs (or any arm64 host), the kind node is arm64 and an amd64 image will load successfully but kubelet will report `ErrImageNeverPull` because containerd refuses to use a platform-mismatched image. Set `ARCH` to match your host:
+
+```bash
+git checkout poc/empty-host-aggregation
+HOST_ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+ARCH=$HOST_ARCH TARGET=local make debian-image
+```
+
+The build produces `nginx/nginx-ingress:5.5.0-SNAPSHOT` (tag derived from `.github/data/version.txt`).
+
+Verify the image exists in your local Docker daemon and matches the host architecture:
+
+```bash
+docker image inspect nginx/nginx-ingress:5.5.0-SNAPSHOT \
+  --format '{{.Architecture}} {{.Os}}'
+# arm64 linux   (or amd64 linux on Intel/AMD hosts)
+```
+
+### 2. Load the image into kind
+
+```bash
+kind load docker-image nginx/nginx-ingress:5.5.0-SNAPSHOT
+```
+
+If you have multiple kind clusters, pass `--name <cluster>` to target the right one. Verify the image is present on the node:
+
+```bash
+docker exec -it kind-control-plane crictl images | grep nginx-ingress
+# docker.io/nginx/nginx-ingress     5.5.0-SNAPSHOT     ...
+```
+
+### 3. Apply the prerequisite manifests
+
+```bash
+kubectl apply -f deployments/common/ns-and-sa.yaml
+kubectl apply -f deployments/rbac/rbac.yaml
+kubectl apply -f deployments/common/nginx-config.yaml
+kubectl apply -f deployments/common/ingress-class.yaml
+kubectl apply -f config/crd/bases/
+```
+
+### 4. Deploy the controller with the feature flag
+
+The stock deployment manifest does not include `--allow-empty-ingress-host`. Apply this minimal version that does (saved as `/tmp/controller.yaml` or anywhere else):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-ingress
+  namespace: nginx-ingress
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate) so iteration via `rollout restart` works:
+  # the controller binds the kind node's host ports 80/443 via hostPort,
+  # so a second replica cannot start alongside the old one.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: nginx-ingress }
+  template:
+    metadata:
+      labels: { app: nginx-ingress }
+    spec:
+      serviceAccountName: nginx-ingress
+      # Tolerate the control-plane taint in case the kind cluster has one
+      # (single-node kind clusters typically don't, but multi-node configs
+      # and some kind versions briefly do during startup).
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Equal
+        effect: NoSchedule
+      containers:
+      - name: nginx-ingress
+        image: nginx/nginx-ingress:5.5.0-SNAPSHOT
+        imagePullPolicy: Never
+        ports:
+        # hostPort binds the controller directly to the kind node's port,
+        # which the kind cluster config maps to localhost:8080 / :8443.
+        - { name: http, containerPort: 80,   hostPort: 80 }
+        - { name: https, containerPort: 443, hostPort: 443 }
+        - { name: readiness-port, containerPort: 8081 }
+        readinessProbe:
+          httpGet: { path: /nginx-ready, port: readiness-port }
+          periodSeconds: 1
+        securityContext:
+          allowPrivilegeEscalation: true
+          runAsUser: 101
+          runAsNonRoot: true
+          capabilities:
+            drop: [ALL]
+            add: [NET_BIND_SERVICE]
+        env:
+        - name: POD_NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        args:
+          - -nginx-configmaps=$(POD_NAMESPACE)/nginx-config
+          - -ingress-class=nginx
+          - -allow-empty-ingress-host
+          - -log-level=debug
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-ingress
+  namespace: nginx-ingress
+spec:
+  type: ClusterIP
+  selector: { app: nginx-ingress }
+  ports:
+  - { name: http, port: 80, targetPort: 80 }
+  - { name: https, port: 443, targetPort: 443 }
+```
+
+```bash
+kubectl apply -f /tmp/controller.yaml
+kubectl -n nginx-ingress rollout status deploy/nginx-ingress --timeout=60s
+```
+
+If the rollout never completes and `kubectl describe pod` shows `ErrImageNeverPull`, the image you loaded is the wrong architecture for the kind node. Rebuild with `ARCH` matching the host (step 1) and re-run `kind load`.
+
+### 5. Apply two hostless Ingresses across two namespaces
+
+The Worked Example section above shows the Ingresses. Use this fuller manifest, which also includes the backend Deployments and Services:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata: { name: team-a }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: team-b }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api, namespace: team-a }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata: { labels: { app: api } }
+    spec:
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0
+        args: ["-text=hello from team-a /api", "-listen=:8080"]
+        ports: [{ containerPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api-svc, namespace: team-a }
+spec:
+  selector: { app: api }
+  ports: [{ port: 8080, targetPort: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: api-ingress, namespace: team-a }
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: api-svc
+            port: { number: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: web, namespace: team-b }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0
+        args: ["-text=hello from team-b /web", "-listen=:8080"]
+        ports: [{ containerPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: web-svc, namespace: team-b }
+spec:
+  selector: { app: web }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: web-ingress, namespace: team-b }
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      - path: /web
+        pathType: Prefix
+        backend:
+          service:
+            name: web-svc
+            port: { number: 80 }
+```
+
+```bash
+kubectl apply -f /tmp/workloads.yaml
+kubectl -n team-a wait --for=condition=ready pod -l app=api --timeout=60s
+kubectl -n team-b wait --for=condition=ready pod -l app=web --timeout=60s
+```
+
+### 6. Verify the rendered aggregate and run nginx -t
+
+```bash
+kubectl -n nginx-ingress exec deploy/nginx-ingress -- ls -la /etc/nginx/conf.d/
+kubectl -n nginx-ingress exec deploy/nginx-ingress -- cat /etc/nginx/conf.d/00-default-server.conf
+kubectl -n nginx-ingress exec deploy/nginx-ingress -- nginx -t
+```
+
+The aggregate should contain one `server { ... default_server ... }` block, two upstreams with real pod IPs, and two locations (`/api` and `/web`). The per-Ingress files (`team-a-api-ingress.conf`, `team-b-web-ingress.conf`) contain only the comment header.
+
+### 7. Curl through the aggregate
+
+The controller binds directly to the kind node's port 80 via `hostPort`; the cluster config's `extraPortMappings` then exposes that as `localhost:8080` on your machine. No port-forward needed.
+
+```bash
+curl -s http://localhost:8080/api
+# hello from team-a /api
+
+curl -s http://localhost:8080/web
+# hello from team-b /web
+
+curl -s -i http://localhost:8080/unknown | head -1
+# HTTP/1.1 404 Not Found
+
+curl -s -H 'Host: bogus.example.invalid' http://localhost:8080/api
+# hello from team-a /api  (default_server catches the unknown Host)
+```
+
+### 8. (Optional) Iterate on the code
+
+After editing source, rebuild the image, reload it into kind, and restart the deployment:
+
+```bash
+TARGET=local make debian-image
+kind load docker-image nginx/nginx-ingress:5.5.0-SNAPSHOT
+kubectl -n nginx-ingress rollout restart deploy/nginx-ingress
+kubectl -n nginx-ingress rollout status deploy/nginx-ingress --timeout=60s
+```
 
 ## Effort Estimate
 
@@ -554,15 +879,15 @@ Replicas may transiently disagree during a rolling upgrade where the binary vers
 | --- | --- | --- |
 | `internal/k8s/configuration.go` (aggregate type, `buildHostsAndResources` extension, path arbitration) | ~250 | ~400 |
 | `internal/configs/ingress.go` (`generateNginxCfgForHostlessIngresses`, `hostFilter` plumbing in `generateNginxCfg`) | ~300 | ~500 |
-| `internal/configs/configurator.go` (`syncHostlessAggregateConfig`, file lifecycle, removal of PoC's single-claim sync) | ~120 | ~200 |
+| `internal/configs/configurator.go` (`syncHostlessAggregateConfig`, file lifecycle, generalisation of PR #9614's single-claim sync) | ~120 | ~200 |
 | `internal/k8s/validation.go` (forbidden-annotation table, `validateHostlessIngress`, marker-comment audit) | ~300 | ~500 |
 | Templates (`nginx.tmpl`, `nginx-plus.tmpl`, `nginx.ingress.tmpl`, `nginx-plus.ingress.tmpl`) | ~80 | covered in ingress.go tests |
-| E2E tests (`tests/`) — cross-namespace merge, oldest-wins, path conflicts, flag-toggle, mergeable-interaction, deletion ordering | — | ~700 |
-| Documentation (Helm chart values, flag reference, hostless usage guide) | ~150 | — |
+| E2E tests (`tests/`): cross-namespace merge, oldest-wins, path conflicts, flag-toggle, mergeable-interaction, deletion ordering | n/a | ~700 |
+| Documentation (Helm chart values, flag reference, hostless usage guide) | ~150 | n/a |
 
 Total: ~1200 lines source + ~2300 lines tests, comparable to the current `feat/empty-host-ingress` branch (PR #9728: +4528 / -2954 across 46 files).
 
-The work is incremental from PR #9614's PoC: the synthetic file slot, `IsDefaultServer` flag, validation hooks, and template changes all stay. The new work is the aggregation path through `Configuration` and `Configurator`, plus the forbidden-annotation audit.
+The work is incremental on top of PR #9614: the synthetic file slot, `IsDefaultServer` flag, validation hooks, and template changes all carry over. The new work is the aggregation path through `Configuration` and `Configurator`, plus the forbidden-annotation audit.
 
 ## Acceptance Criteria
 
